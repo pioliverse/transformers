@@ -204,7 +204,7 @@ class CPMAntModelIntegrationTest(unittest.TestCase):
         tokenizer = CPMAntTokenizer.from_pretrained(model_path)
         input_ids = tokenizer.get_model_input(texts)
         logits = model(**input_ids)[0]
-        vocab_size = 30720
+        vocab_size = 30752
         expected_shape = torch.Size((1, 38, vocab_size))
 
         self.assertEqual(logits.shape, expected_shape)

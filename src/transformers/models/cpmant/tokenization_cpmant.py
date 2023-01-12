@@ -19,6 +19,7 @@ from importlib.util import find_spec
 from typing import Optional, Tuple
 
 from transformers import is_torch_available
+from transformers.utils import PaddingStrategy
 
 
 if is_torch_available():
@@ -175,6 +176,7 @@ class CPMAntTokenizer(PreTrainedTokenizer):
             unk_token=unk_token,
             line_token=line_token,
             space_token=space_token,
+            padding_side="left",
             **kwargs,
         )
         self.bod_token = bod_token
@@ -211,7 +213,7 @@ class CPMAntTokenizer(PreTrainedTokenizer):
         return self.encoder[self.bos_token]
 
     @property
-    def pad_id(self):
+    def pad_token_id(self):
         return self.encoder[self.pad_token]
 
     @property
@@ -243,8 +245,8 @@ class CPMAntTokenizer(PreTrainedTokenizer):
         if isinstance(tokens[0], list):
             tokens = tokens[0]
         tokens = [i for i in tokens if i >= 0]
-        text = "".join([self.decoder[x] for x in tokens if x != self.pad_id])
-        return text
+        text = "".join([self.decoder[x] for x in tokens if x != self.pad_token_id and x != self.eos_id])
+        return self.postprocess(text)
 
     def check(self, token):
         return token in self.encoder
@@ -254,6 +256,11 @@ class CPMAntTokenizer(PreTrainedTokenizer):
 
     def convert_ids_to_tokens(self, ids):
         return [self.decoder[x] if x >= 0 else self.unk_token for x in ids]
+
+    def postprocess(self, text):
+        begin = text.find(self.bos_token)
+        end = text.find(self.eos_token)
+        return text[begin + len(self.bos_token) : end]
 
     def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> Tuple[str]:
         if os.path.isdir(save_directory):
@@ -275,16 +282,44 @@ class CPMAntTokenizer(PreTrainedTokenizer):
                 index += 1
         return (vocab_file,)
 
+    def prepare_for_model(self, first_ids, pair_ids=None, task_id=2, prompt_length=32, **kwargs):
+        input_ids = [self.bos_id] + first_ids
+        input_ids = [j for j in input_ids if j != self.unk_id]
+        model_inputs = {}
+        model_inputs["input_ids"] = [x + prompt_length * task_id for x in range(prompt_length)] + input_ids
+        model_inputs["length"] = len(model_inputs["input_ids"])
+        model_inputs["position"] = list(range(len(model_inputs["input_ids"])))
+        model_inputs["span"] = [0] * len(model_inputs["input_ids"])
+        model_inputs["context"] = [True] * len(model_inputs["input_ids"])
+        model_inputs["segment"] = [0] * prompt_length + [2] * len(input_ids)
+        return model_inputs
+
+    def _pad(self, encoded_inputs, max_length, padding_strategy, return_attention_mask, **kwargs):
+        required_input = encoded_inputs[self.model_input_names[0]]
+        needs_to_be_padded = padding_strategy != PaddingStrategy.DO_NOT_PAD and len(required_input) != max_length
+        # Initialize attention mask if not present.
+        if return_attention_mask and "attention_mask" not in encoded_inputs:
+            encoded_inputs["attention_mask"] = [1] * len(required_input)
+        if needs_to_be_padded:
+            difference = max_length - len(required_input)
+            encoded_inputs["length"] = max_length
+            for key in encoded_inputs.keys():
+                if key != "length":
+                    encoded_inputs[key] = [self.pad_token_id] * difference + encoded_inputs[key]
+            if return_attention_mask:
+                encoded_inputs["attention_mask"] = [0] * difference + encoded_inputs["attention_mask"]
+        return encoded_inputs
+
     def _convert_to_tensors(self, input_text, prompt_length=32, task_id=2):
         model_inputs = {}
         input_ids = [self.bos_id] + self.encode(input_text)
         input_ids = [j for j in input_ids if j != self.unk_id]
 
-        model_inputs["input"] = [x + prompt_length * task_id for x in range(prompt_length)] + input_ids
-        model_inputs["length"] = len(model_inputs["input"])
-        model_inputs["position"] = list(range(len(model_inputs["input"])))
-        model_inputs["span"] = [0] * len(model_inputs["input"])
-        model_inputs["context"] = [True] * len(model_inputs["input"])
+        model_inputs["input_ids"] = [x + prompt_length * task_id for x in range(prompt_length)] + input_ids
+        model_inputs["length"] = len(model_inputs["input_ids"])
+        model_inputs["position"] = list(range(len(model_inputs["input_ids"])))
+        model_inputs["span"] = [0] * len(model_inputs["input_ids"])
+        model_inputs["context"] = [True] * len(model_inputs["input_ids"])
         model_inputs["segment"] = [0] * prompt_length + [2] * len(input_ids)
 
         for key in model_inputs:
